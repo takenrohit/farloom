@@ -371,6 +371,22 @@ mod tests {
     }
 
     #[test]
+    fn reserved_invalid_and_oversized_names_are_404_not_500() {
+        let (_tmp, sf) = setup();
+        let long = format!("/{}", "a".repeat(300));
+        let deep = "/a".repeat(2000);
+        for p in [
+            "/con", "/nul", "/aux.txt", "/COM1", "/index.html.", "/index.html%20", "/a*b",
+            "/a%3Fb", "/a<b", "/a%22b", "/a|b", "/%01", "/%7f", "/...", long.as_str(),
+            deep.as_str(),
+        ] {
+            assert!(matches!(sf.resolve(p), Err(ResolveError::NotFound)), "{p:.40}");
+            assert_eq!(sf.serve(&req(Method::Get, p)).status, StatusCode::NotFound, "{p:.40}");
+        }
+        assert_eq!(sf.serve(&req(Method::Get, "/sub/.")).body, b"sub index");
+    }
+
+    #[test]
     fn non_get_is_405_with_allow_get() {
         let (_tmp, sf) = setup();
         for m in [Method::Post, Method::Other("DELETE".into())] {

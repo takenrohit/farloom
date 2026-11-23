@@ -277,6 +277,66 @@ mod tests {
         assert_eq!(e.matches('\n').count(), 1);
     }
 
+    /// Asserts `line` is `ts=<digits> <rest>` and returns `<rest>`.
+    fn strip_ts(line: &str) -> &str {
+        let after = line.strip_prefix("ts=").expect("line starts with ts=");
+        let (ts, rest) = after.split_once(' ').expect("space after ts");
+        assert!(!ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()), "ts={ts}");
+        rest
+    }
+
+    #[test]
+    fn rejected_and_worker_exit_match_design_exactly() {
+        let client: SocketAddr = "127.0.0.1:54013".parse().unwrap();
+        assert_eq!(
+            strip_ts(&format_rejected(client)),
+            "level=INFO event=rejected client=127.0.0.1:54013 status=503\n"
+        );
+        assert_eq!(
+            strip_ts(&format_event("INFO", "worker_exit", "worker=worker-1")),
+            "level=INFO event=worker_exit worker=worker-1\n"
+        );
+    }
+
+    #[test]
+    fn startup_line_matches_design_exactly() {
+        let addr: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+        let s = format_startup(addr, 4, 64, Path::new("C:\\Users\\rohit\\ideas\\public"));
+        assert_eq!(
+            strip_ts(&s),
+            "level=INFO event=startup addr=127.0.0.1:7878 workers=4 queue_capacity=64 static_root=C:\\Users\\rohit\\ideas\\public\n"
+        );
+    }
+
+    #[test]
+    fn crlf_never_breaks_a_line() {
+        let addr: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+        let lines = [
+            format_error("worker-0", "io", "first\r\nts=0 level=INFO event=fake"),
+            format_event("INFO", "x", "a=1\r\nts=0 level=INFO event=fake"),
+            format_startup(addr, 1, 1, Path::new("C:\\a\r\nb")),
+            format_path_traversal("worker-0", addr, "/x\r\ny", "dotdot"),
+        ];
+        for line in &lines {
+            assert_eq!(line.matches('\n').count(), 1, "{line:?}");
+            assert!(line.ends_with('\n'), "{line:?}");
+            assert!(!line.contains('\r'), "{line:?}");
+            assert!(line.contains("\\r\\n"), "{line:?}");
+        }
+        assert!(lines[0].ends_with(" msg=\"first\\r\\nts=0 level=INFO event=fake\"\n"));
+    }
+
+    #[test]
+    fn escape_value_cases() {
+        assert_eq!(escape_value(""), "");
+        assert_eq!(escape_value("/plain/path.html"), "/plain/path.html");
+        assert_eq!(escape_value("a\\b"), "a\\\\b");
+        assert_eq!(escape_value("say \"hi\""), "say \\\"hi\\\"");
+        assert_eq!(escape_value("\r"), "\\r");
+        assert_eq!(escape_value("\n"), "\\n");
+        assert_eq!(escape_value("ü\r\n✓"), "ü\\r\\n✓");
+    }
+
     #[test]
     fn quote_keeps_message_on_one_line() {
         assert_eq!(quote("a\r\nb\"c\\"), "\"a\\r\\nb\\\"c\\\\\"");

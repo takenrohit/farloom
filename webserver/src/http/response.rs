@@ -187,4 +187,77 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
     }
+
+    const ALL: [(StatusCode, u16, &str); 7] = [
+        (StatusCode::Ok, 200, "OK"),
+        (StatusCode::BadRequest, 400, "Bad Request"),
+        (StatusCode::NotFound, 404, "Not Found"),
+        (StatusCode::MethodNotAllowed, 405, "Method Not Allowed"),
+        (StatusCode::PayloadTooLarge, 413, "Payload Too Large"),
+        (StatusCode::InternalServerError, 500, "Internal Server Error"),
+        (StatusCode::ServiceUnavailable, 503, "Service Unavailable"),
+    ];
+
+    #[test]
+    fn reason_phrase_table() {
+        for (status, code, reason) in ALL {
+            assert_eq!(status.code(), code);
+            assert_eq!(status.reason(), reason);
+            let text = String::from_utf8(Response::new(status).to_bytes()).unwrap();
+            assert!(
+                text.starts_with(&format!("HTTP/1.1 {} {}\r\n", code, reason)),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_error_status_is_text_plain_with_code_and_reason() {
+        for (status, code, reason) in ALL.into_iter().filter(|(_, c, _)| *c >= 400) {
+            let resp = Response::error(status);
+            let types: Vec<_> = resp
+                .headers
+                .iter()
+                .filter(|(n, _)| n.eq_ignore_ascii_case("content-type"))
+                .collect();
+            assert_eq!(types.len(), 1);
+            assert_eq!(types[0].1, "text/plain; charset=utf-8");
+            let body = String::from_utf8(resp.body.clone()).unwrap();
+            assert!(body.contains(&code.to_string()) && body.contains(reason), "{body:?}");
+            let text = String::from_utf8(resp.to_bytes()).unwrap();
+            assert!(text.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+            assert!(text.contains(&format!("Content-Length: {}\r\n", resp.body.len())));
+        }
+    }
+
+    #[test]
+    fn write_response_writes_exactly_to_bytes() {
+        let responses = [
+            Response::new(StatusCode::Ok),
+            Response::error(StatusCode::ServiceUnavailable),
+            Response::method_not_allowed(&[Method::Get]),
+            Response::new(StatusCode::Ok).with_body("text/html", b"<p>hi</p>".to_vec()),
+        ];
+        for resp in &responses {
+            let mut out = Vec::new();
+            write_response(&mut out, resp).unwrap();
+            assert_eq!(out, resp.to_bytes());
+        }
+    }
+
+    #[test]
+    fn handler_framing_headers_overridden_exactly_once() {
+        let resp = Response::new(StatusCode::Ok)
+            .with_header("Content-Length", "1")
+            .with_header("Connection", "keep-alive")
+            .with_body("text/plain", b"hello".to_vec());
+        let text = String::from_utf8(resp.to_bytes()).unwrap();
+        let head = text.split("\r\n\r\n").next().unwrap().to_ascii_lowercase();
+        assert_eq!(head.matches("content-length:").count(), 1);
+        assert_eq!(head.matches("connection:").count(), 1);
+        assert!(head.contains("content-length: 5"));
+        assert!(head.contains("connection: close"));
+        assert!(!head.contains("keep-alive"));
+        assert!(text.ends_with("\r\n\r\nhello"));
+    }
 }

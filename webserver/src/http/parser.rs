@@ -275,4 +275,113 @@ mod tests {
             Err(ParseError::Incomplete)
         ));
     }
+
+    fn assert_bad(bytes: &[u8]) {
+        match parse(bytes) {
+            Err(ParseError::BadRequest(_)) => {}
+            other => panic!(
+                "expected BadRequest for {:?}, got {:?}",
+                String::from_utf8_lossy(bytes),
+                other
+            ),
+        }
+    }
+
+    /// Yields `data` once, then fails every read with `kind`.
+    struct FailAfter {
+        data: Vec<u8>,
+        pos: usize,
+        kind: io::ErrorKind,
+    }
+
+    impl Read for FailAfter {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos < self.data.len() {
+                let n = buf.len().min(self.data.len() - self.pos);
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            } else {
+                Err(io::Error::new(self.kind, "mock"))
+            }
+        }
+    }
+
+    fn parse_failing(prefix: &[u8], kind: io::ErrorKind) -> Result<Request, ParseError> {
+        let mut r = io::BufReader::new(FailAfter { data: prefix.to_vec(), pos: 0, kind });
+        parse_request(&mut r, &Limits::new(1024))
+    }
+
+    #[test]
+    fn timeouts_map_to_timeout_before_and_mid_body() {
+        for kind in [io::ErrorKind::TimedOut, io::ErrorKind::WouldBlock] {
+            assert!(matches!(parse_failing(b"", kind), Err(ParseError::Timeout)), "{kind:?}");
+            assert!(
+                matches!(parse_failing(b"GET / HTTP/1.1\r\nHo", kind), Err(ParseError::Timeout)),
+                "{kind:?} mid-head"
+            );
+            assert!(
+                matches!(
+                    parse_failing(b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc", kind),
+                    Err(ParseError::Timeout)
+                ),
+                "{kind:?} mid-body"
+            );
+        }
+    }
+
+    #[test]
+    fn head_of_exactly_limit_succeeds_and_one_more_fails() {
+        // "GET / HTTP/1.1\r\n" (16) + "X: " (3) + pad + "\r\n" (2) + "\r\n" (2)
+        let build = |total: usize| {
+            let pad = total - 23;
+            let mut v = b"GET / HTTP/1.1\r\nX: ".to_vec();
+            v.extend(std::iter::repeat(b'a').take(pad));
+            v.extend_from_slice(b"\r\n\r\n");
+            assert_eq!(v.len(), total);
+            v
+        };
+        assert!(parse(&build(8192)).is_ok());
+        assert_bad(&build(8193));
+    }
+
+    #[test]
+    fn content_length_rules() {
+        let req = parse(b"POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello")
+            .unwrap();
+        assert_eq!(req.body, b"hello");
+
+        assert_bad(b"POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!");
+        for v in ["+5", "-1", "5,5", " "] {
+            assert_bad(format!("POST / HTTP/1.1\r\nContent-Length:{v}\r\n\r\n").as_bytes());
+        }
+        assert!(matches!(
+            parse(b"POST / HTTP/1.1\r\nContent-Length: 99999999999999999999999\r\n\r\n"),
+            Err(ParseError::PayloadTooLarge)
+        ));
+    }
+
+    #[test]
+    fn header_names_lowercased_and_values_trimmed() {
+        let req = parse(b"GET / HTTP/1.1\r\nX-Custom-HEADER: \t value \t\r\n\r\n").unwrap();
+        assert_eq!(req.headers.get("x-custom-header"), Some("value"));
+        assert!(format!("{:?}", req.headers).contains("\"x-custom-header\""));
+    }
+
+    #[test]
+    fn malformed_heads_are_bad_request() {
+        assert_bad(b"GET / HTTP/1.1\r\nA: b\r\n continued\r\n\r\n"); // obs-fold
+        assert_bad(b"GET / HTTP/1.1\r\nHost : x\r\n\r\n"); // whitespace before colon
+        assert_bad(b"GET /a%zz HTTP/1.1\r\n\r\n");
+        assert_bad(b"GET /a?q=%4 HTTP/1.1\r\n\r\n");
+        assert_bad(b"GET /a#frag HTTP/1.1\r\n\r\n");
+        assert_bad(b"GET http://example.com/ HTTP/1.1\r\n\r\n");
+        assert_bad(b"GET / HTTP/2.0\r\n\r\n");
+    }
+
+    #[test]
+    fn lowercase_method_is_other() {
+        let req = parse(b"get / HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!(req.method, Method::Other("get".into()));
+    }
 }

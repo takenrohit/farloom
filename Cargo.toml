@@ -1,0 +1,6 @@
+[workspace]
+members = ["webserver", "loadtest", "testkit"]
+resolver = "2"
+
+# Do not set `panic = "abort"` in any profile: the server relies on
+# `std::panic::catch_unwind`, which only works with the default `unwind` strategy.

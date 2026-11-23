@@ -201,3 +201,175 @@ impl Config {
         Ok(canonical)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn parse(list: &[&str]) -> Result<Config, ConfigError> {
+        Config::from_args(args(list))
+    }
+
+    /// Unique temp directory, removed on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!(
+                "webserver-config-{tag}-{}-{nanos}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn empty_args_give_defaults() {
+        assert_eq!(parse(&[]), Ok(Config::default()));
+    }
+
+    #[test]
+    fn zero_workers_is_rejected() {
+        assert_eq!(
+            parse(&["--workers", "0"]),
+            Err(ConfigError::MustBePositive { option: "--workers" })
+        );
+    }
+
+    #[test]
+    fn zero_queue_capacity_is_rejected() {
+        assert_eq!(
+            parse(&["--queue-capacity", "0"]),
+            Err(ConfigError::MustBePositive { option: "--queue-capacity" })
+        );
+    }
+
+    #[test]
+    fn zero_port_is_accepted() {
+        assert_eq!(parse(&["--port", "0"]).unwrap().port, 0);
+    }
+
+    #[test]
+    fn separate_and_inline_values_are_equivalent() {
+        let separate = parse(&[
+            "--host", "0.0.0.0", "--port", "8080", "--workers", "8", "--queue-capacity", "16",
+            "--static-root", "site", "--read-timeout-secs", "2", "--write-timeout-secs", "3",
+            "--max-body-bytes", "10", "--max-requests", "7",
+        ])
+        .unwrap();
+        let inline = parse(&[
+            "--host=0.0.0.0", "--port=8080", "--workers=8", "--queue-capacity=16",
+            "--static-root=site", "--read-timeout-secs=2", "--write-timeout-secs=3",
+            "--max-body-bytes=10", "--max-requests=7",
+        ])
+        .unwrap();
+        assert_eq!(separate, inline);
+        assert_eq!(
+            separate,
+            Config {
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+                workers: 8,
+                queue_capacity: 16,
+                static_root: PathBuf::from("site"),
+                read_timeout: Duration::from_secs(2),
+                write_timeout: Duration::from_secs(3),
+                max_body_bytes: 10,
+                max_requests: Some(7),
+            }
+        );
+    }
+
+    #[test]
+    fn last_value_wins() {
+        assert_eq!(parse(&["--port", "1", "--port=2", "--port", "3"]).unwrap().port, 3);
+    }
+
+    #[test]
+    fn unknown_option_is_rejected() {
+        assert_eq!(
+            parse(&["--bogus", "1"]),
+            Err(ConfigError::UnknownOption("--bogus".to_string()))
+        );
+        assert_eq!(
+            parse(&["positional"]),
+            Err(ConfigError::UnknownOption("positional".to_string()))
+        );
+    }
+
+    #[test]
+    fn missing_value_is_rejected() {
+        assert_eq!(
+            parse(&["--port"]),
+            Err(ConfigError::MissingValue { option: "--port" })
+        );
+        assert_eq!(
+            parse(&["--port", "--workers", "2"]),
+            Err(ConfigError::MissingValue { option: "--port" })
+        );
+    }
+
+    #[test]
+    fn invalid_value_display_names_option() {
+        let err = parse(&["--port", "70000"]).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue { option: "--port", .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("--port"), "{msg}");
+        assert!(msg.contains("70000"), "{msg}");
+
+        let err = parse(&["--workers=abc"]).unwrap_err();
+        assert!(err.to_string().contains("--workers"));
+        let err = parse(&["--workers", "0"]).unwrap_err();
+        assert!(err.to_string().contains("--workers"));
+    }
+
+    #[test]
+    fn help_is_requested() {
+        assert_eq!(parse(&["--help"]), Err(ConfigError::HelpRequested));
+        assert_eq!(parse(&["-h"]), Err(ConfigError::HelpRequested));
+        assert_eq!(parse(&["--port", "1", "--help"]), Err(ConfigError::HelpRequested));
+    }
+
+    #[test]
+    fn existing_directory_static_root_is_canonicalized() {
+        let tmp = TempDir::new("dir");
+        let cfg = Config { static_root: tmp.0.clone(), ..Config::default() };
+        let canonical = cfg.validate_static_root().unwrap();
+        assert_eq!(canonical, std::fs::canonicalize(&tmp.0).unwrap());
+    }
+
+    #[test]
+    fn nonexistent_static_root_fails() {
+        let tmp = TempDir::new("missing");
+        let cfg = Config { static_root: tmp.0.join("does-not-exist"), ..Config::default() };
+        assert!(cfg.validate_static_root().is_err());
+    }
+
+    #[test]
+    fn file_static_root_fails() {
+        let tmp = TempDir::new("file");
+        let file = tmp.0.join("index.html");
+        std::fs::write(&file, b"hi").unwrap();
+        let cfg = Config { static_root: file, ..Config::default() };
+        let err = cfg.validate_static_root().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+}

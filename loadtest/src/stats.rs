@@ -1,6 +1,5 @@
 //! Per-thread response statistics for the load tester.
 
-
 use std::collections::BTreeMap;
 
 /// Counts of responses by status code, plus failed requests.

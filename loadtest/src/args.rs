@@ -85,7 +85,18 @@ impl LoadArgs {
 
             match option {
                 "--addr" => out.addr = value,
-                "--path" => out.path = value,
+                "--path" => {
+                    // The path is written into the request line verbatim, so it must not
+                    // contain spaces or control characters (CR/LF would inject headers).
+                    if !value.starts_with('/') || value.bytes().any(|b| b <= 0x20 || b == 0x7F) {
+                        return Err(ArgsError::InvalidValue {
+                            option,
+                            value,
+                            expected: "path starting with '/' without spaces or control characters",
+                        });
+                    }
+                    out.path = value
+                }
                 "--requests" => out.requests = parse_num(option, &value, "positive integer")?,
                 "--concurrency" => {
                     out.concurrency = parse_num(option, &value, "positive integer")?
@@ -221,6 +232,16 @@ mod tests {
             assert_eq!(e, ArgsError::MissingValue { option: opt });
             assert!(e.to_string().contains(opt), "message for {opt}: {e}");
         }
+    }
+
+    #[test]
+    fn invalid_paths_fail_and_name_option() {
+        for p in ["health", "/a b", "/a\r\nX: y", ""] {
+            let e = parse(&["--path", p]).unwrap_err();
+            assert!(matches!(e, ArgsError::InvalidValue { option: "--path", .. }), "{p:?}");
+            assert!(e.to_string().contains("--path"));
+        }
+        assert_eq!(parse(&["--path", "/a?b=c"]).unwrap().path, "/a?b=c");
     }
 
     #[test]

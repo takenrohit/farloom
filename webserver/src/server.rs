@@ -240,6 +240,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::sync::atomic::AtomicUsize;
+    use std::sync::{mpsc, Mutex};
     use std::time::Instant;
 
     struct TempDir(PathBuf);
@@ -322,6 +323,101 @@ mod tests {
         assert!(get(addr, "/health").starts_with("HTTP/1.1 200 OK"));
         assert!(get(addr, "/health").starts_with("HTTP/1.1 200 OK"));
         t.join().unwrap().unwrap();
+    }
+
+    /// Router with GET /block, which signals `entered` and then waits for `release`.
+    fn blocking_router() -> (Router, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let router = Router::with_builtins().get("/block", move |_| {
+            let _ = entered_tx.lock().unwrap().send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+            Response::new(StatusCode::Ok).with_body("text/plain", b"released".to_vec())
+        });
+        (router, entered_rx, release_tx)
+    }
+
+    #[test]
+    fn shutdown_waits_for_in_flight_request() {
+        let root = temp_dir();
+        let config = Config {
+            workers: 1,
+            ..test_config(&root)
+        };
+        let (router, entered_rx, release_tx) = blocking_router();
+        let server = Server::bind(config, router).unwrap();
+        let addr = server.local_addr();
+        let handle = server.shutdown_handle();
+        let (done_tx, done_rx) = mpsc::channel();
+        let t = thread::spawn(move || {
+            let r = server.run();
+            let _ = done_tx.send(());
+            r
+        });
+
+        let client = thread::spawn(move || get(addr, "/block"));
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("handler entered");
+
+        handle.shutdown();
+        // The in-flight job keeps run() from returning.
+        assert!(done_rx.recv_timeout(Duration::from_millis(300)).is_err());
+
+        release_tx.send(()).unwrap();
+        let resp = client.join().unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"), "{resp}");
+        assert!(resp.ends_with("released"));
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("run returns after the in-flight job finishes");
+        t.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn max_requests_serves_queued_nth_connection() {
+        let root = temp_dir();
+        let config = Config {
+            workers: 1,
+            max_requests: Some(2),
+            ..test_config(&root)
+        };
+        let (router, entered_rx, release_tx) = blocking_router();
+        let server = Server::bind(config, router).unwrap();
+        let addr = server.local_addr();
+        let (done_tx, done_rx) = mpsc::channel();
+        let t = thread::spawn(move || {
+            let r = server.run();
+            let _ = done_tx.send(());
+            r
+        });
+
+        // A occupies the only worker.
+        let a = thread::spawn(move || get(addr, "/block"));
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("handler entered");
+        // B is the 2nd (last) accepted connection: it triggers shutdown and is queued.
+        let b = thread::spawn(move || get(addr, "/health"));
+        // Shutdown has been triggered by B's accept, but run must wait for A and B.
+        assert!(done_rx.recv_timeout(Duration::from_millis(300)).is_err());
+
+        release_tx.send(()).unwrap();
+        let ra = a.join().unwrap();
+        let rb = b.join().unwrap();
+        assert!(ra.starts_with("HTTP/1.1 200 OK\r\n"), "{ra}");
+        assert!(rb.starts_with("HTTP/1.1 200 OK\r\n"), "{rb}");
+        assert!(rb.ends_with(r#"{"status":"ok"}"#));
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("run returns after queued jobs drain");
+        t.join().unwrap().unwrap();
+        assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_err());
     }
 
     #[test]

@@ -296,6 +296,81 @@ mod tests {
     }
 
     #[test]
+    fn spec_traversal_examples_give_expected_rule() {
+        let (_tmp, sf) = setup();
+        let cases = [
+            ("/..%2fCargo.toml", "dotdot"),
+            ("/%5c..%5cwin.ini", "backslash"),
+            ("/C:/Windows/win.ini", "colon"),
+            ("//server/share", "leading //"),
+            ("/a%00b", "nul"),
+        ];
+        for (p, rule) in cases {
+            match sf.resolve(p) {
+                Err(ResolveError::Traversal(r)) => assert_eq!(r, rule, "{p}"),
+                other => panic!("{p}: expected Traversal({rule}), got {other:?}"),
+            }
+            let r = sf.serve(&req(Method::Get, p));
+            assert_eq!(r.status, StatusCode::NotFound, "{p}");
+            assert_eq!(header(&r, "content-type"), Some("text/plain; charset=utf-8"));
+        }
+    }
+
+    #[test]
+    fn sibling_directory_with_shared_prefix_is_outside_root() {
+        let tmp = TempDir::new();
+        let public = tmp.0.join("public");
+        let public2 = tmp.0.join("public2");
+        fs::create_dir_all(&public).unwrap();
+        fs::create_dir_all(&public2).unwrap();
+        fs::write(public.join("index.html"), b"ok").unwrap();
+        fs::write(public2.join("secret.txt"), b"secret").unwrap();
+        let root = fs::canonicalize(&public).unwrap();
+        let secret = fs::canonicalize(public2.join("secret.txt")).unwrap();
+        let sf = StaticFiles::new(root.clone());
+
+        // A naive string-prefix check would accept the sibling; component-wise
+        // `Path::starts_with` must not.
+        assert!(secret.to_string_lossy().starts_with(&*root.to_string_lossy()));
+        assert!(!secret.starts_with(&root));
+
+        for p in [
+            "/../public2/secret.txt",
+            "/..%2fpublic2%2fsecret.txt",
+            "/%2e%2e/public2/secret.txt",
+            "/..\\public2\\secret.txt",
+            "/public2/secret.txt",
+            "/2/secret.txt",
+            "/secret.txt",
+        ] {
+            match sf.resolve(p) {
+                Ok(resolved) => panic!("{p} resolved to {}", resolved.display()),
+                Err(ResolveError::Io(e)) => panic!("{p}: unexpected io error {e}"),
+                Err(_) => {}
+            }
+            let r = sf.serve(&req(Method::Get, p));
+            assert_eq!(r.status, StatusCode::NotFound, "{p}");
+            assert_ne!(r.body, b"secret", "{p}");
+        }
+        assert_eq!(sf.resolve("/").unwrap(), root.join("index.html"));
+    }
+
+    #[test]
+    fn served_file_has_exact_bytes_and_length() {
+        let (tmp, sf) = setup();
+        let bytes: Vec<u8> = (0u8..=255).chain([0, 13, 10, 0]).collect();
+        fs::write(tmp.0.join("public").join("img.png"), &bytes).unwrap();
+        let r = sf.serve(&req(Method::Get, "/img.png"));
+        assert_eq!(r.status, StatusCode::Ok);
+        assert_eq!(r.body, bytes);
+        assert_eq!(header(&r, "content-type"), Some("image/png"));
+        let wire = r.to_bytes();
+        let text = String::from_utf8_lossy(&wire);
+        assert!(text.contains(&format!("Content-Length: {}\r\n", bytes.len())), "{text}");
+        assert!(wire.ends_with(&bytes));
+    }
+
+    #[test]
     fn non_get_is_405_with_allow_get() {
         let (_tmp, sf) = setup();
         for m in [Method::Post, Method::Other("DELETE".into())] {

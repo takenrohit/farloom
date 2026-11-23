@@ -82,4 +82,41 @@ mod tests {
             _ => panic!("expected MethodNotAllowed"),
         }
     }
+
+    fn allow_header(resp: &Response) -> Option<&str> {
+        resp.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("allow"))
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn not_allowed_response(r: &Router, method: Method, path: &str) -> Response {
+        match r.lookup(&method, path) {
+            RouteMatch::MethodNotAllowed { allow } => Response::method_not_allowed(&allow),
+            _ => panic!("expected MethodNotAllowed for {path}"),
+        }
+    }
+
+    #[test]
+    fn get_echo_yields_allow_post() {
+        let r = Router::with_builtins();
+        let resp = not_allowed_response(&r, Method::Get, "/api/echo");
+        assert_eq!(resp.status, StatusCode::MethodNotAllowed);
+        assert_eq!(allow_header(&resp), Some("POST"));
+    }
+
+    #[test]
+    fn delete_health_yields_allow_get() {
+        let r = Router::with_builtins();
+        let resp = not_allowed_response(&r, Method::Other("DELETE".into()), "/health");
+        assert_eq!(resp.status, StatusCode::MethodNotAllowed);
+        assert_eq!(allow_header(&resp), Some("GET"));
+    }
+
+    #[test]
+    fn builtins_unregistered_path_is_not_found() {
+        let r = Router::with_builtins();
+        assert!(matches!(r.lookup(&Method::Get, "/nope"), RouteMatch::NotFound));
+        assert!(matches!(r.lookup(&Method::Get, "/health/"), RouteMatch::NotFound));
+    }
 }

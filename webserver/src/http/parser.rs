@@ -116,7 +116,9 @@ fn parse_request_line(line: &str) -> Result<(Method, String, Option<String>, Ver
     if !target.starts_with('/') {
         return Err(ParseError::BadRequest("request target must be origin-form"));
     }
-    if target.bytes().any(|b| b <= 0x20 || b == 0x7F || b == b'#') {
+    // RFC 3986 targets are ASCII; non-ASCII must arrive percent-encoded. Rejecting raw
+    // non-ASCII also keeps Unicode controls (U+0085, U+2028, C1 codes) out of the logs.
+    if target.bytes().any(|b| b <= 0x20 || b >= 0x7F || b == b'#') {
         return Err(ParseError::BadRequest("invalid character in request target"));
     }
     let version = match version {
@@ -377,6 +379,15 @@ mod tests {
         assert_bad(b"GET /a#frag HTTP/1.1\r\n\r\n");
         assert_bad(b"GET http://example.com/ HTTP/1.1\r\n\r\n");
         assert_bad(b"GET / HTTP/2.0\r\n\r\n");
+    }
+
+    #[test]
+    fn raw_non_ascii_target_is_bad_request_but_encoded_is_fine() {
+        assert_bad("GET /caf\u{e9} HTTP/1.1\r\n\r\n".as_bytes());
+        assert_bad("GET /a\u{2028}b HTTP/1.1\r\n\r\n".as_bytes());
+        assert_bad("GET /a?q=\u{85} HTTP/1.1\r\n\r\n".as_bytes());
+        let req = parse(b"GET /caf%C3%A9 HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!(req.path, "/caf%C3%A9");
     }
 
     #[test]

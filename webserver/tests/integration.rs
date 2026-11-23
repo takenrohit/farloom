@@ -125,3 +125,107 @@ fn health_returns_200() {
     assert_eq!(resp.body_str(), r#"{"status":"ok"}"#);
     assert!(server.stop_and_join(Duration::from_secs(1)));
 }
+
+// ---------------------------------------------------------------------------
+// Error responses
+// ---------------------------------------------------------------------------
+
+/// Checks the shared error shape: status, reason, plain-text body naming the
+/// code and reason, exact Content-Length, and `Connection: close`.
+fn assert_error(resp: &RawResponse, code: u16, reason: &str) {
+    assert_eq!(resp.status, code, "raw: {:?}", String::from_utf8_lossy(&resp.raw));
+    assert_eq!(resp.reason, reason);
+    assert_eq!(resp.header("Content-Type"), Some("text/plain; charset=utf-8"));
+    assert_eq!(resp.header("Connection"), Some("close"));
+    assert_eq!(resp.header_count("Content-Length"), 1);
+    assert_eq!(
+        resp.header("Content-Length"),
+        Some(resp.body.len().to_string().as_str())
+    );
+    let body = resp.body_str();
+    assert!(
+        body.contains(&code.to_string()) && body.contains(reason),
+        "error body {body:?} must contain {code} and {reason:?}"
+    );
+}
+
+#[test]
+fn bad_request_for_bare_lf_chunked_and_bad_percent_encoding() {
+    let server = static_server();
+    let cases: [&[u8]; 3] = [
+        b"GET / HTTP/1.1\n\n",
+        b"POST /api/echo HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        b"GET /%zz HTTP/1.1\r\nHost: test\r\n\r\n",
+    ];
+    for req in cases {
+        let resp = raw_request(server.addr(), req);
+        assert_error(&resp, 400, "Bad Request");
+    }
+}
+
+#[test]
+fn not_found_for_missing_file_and_traversal_attempts() {
+    // Layout: <tmp>/Cargo.toml (must never be served) and <tmp>/public/ (static root).
+    let root = TempDir::new();
+    root.write("Cargo.toml", b"[package]\nname = \"secret\"\n");
+    root.write("public/index.html", INDEX_HTML);
+    let public = root.path().join("public");
+    let server = TestServer::start_with_root(
+        root,
+        move |c| c.static_root = public,
+        Router::with_builtins(),
+    );
+    for path in [
+        "/missing.html",
+        "/..%2f..%2fCargo.toml",
+        "/..%2fCargo.toml",
+        "/%5c..%5cCargo.toml",
+    ] {
+        let resp = get(server.addr(), path);
+        assert_error(&resp, 404, "Not Found");
+        assert!(!resp.body_str().contains("secret"), "{path} leaked Cargo.toml");
+    }
+    // Sanity check: the static root itself is served.
+    assert_eq!(get(server.addr(), "/index.html").status, 200);
+}
+
+#[test]
+fn method_not_allowed_lists_allowed_methods() {
+    let server = static_server();
+    let cases = [
+        ("POST", "/index.html", "GET"),
+        ("GET", "/api/echo", "POST"),
+        ("DELETE", "/health", "GET"),
+    ];
+    for (method, path, allow) in cases {
+        let req = format!("{method} {path} HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n");
+        let resp = raw_request(server.addr(), req.as_bytes());
+        assert_error(&resp, 405, "Method Not Allowed");
+        assert_eq!(resp.header("Allow"), Some(allow), "{method} {path}");
+    }
+}
+
+#[test]
+fn payload_too_large_is_delivered_without_body_sent() {
+    let server = TestServer::start(|c| c.max_body_bytes = 10, Router::with_builtins());
+    // Head only; the client keeps its write side open and never sends the body.
+    let mut s = connect(server.addr()).expect("connect");
+    s.write_all(b"POST /api/echo HTTP/1.1\r\nHost: test\r\nContent-Length: 11\r\n\r\n")
+        .expect("write head");
+    let raw = common::read_to_eof(&mut s).expect("must receive the 413, not a reset");
+    let resp = parse_raw_response(raw).unwrap_or_else(|e| panic!("bad response: {e}"));
+    assert_error(&resp, 413, "Payload Too Large");
+}
+
+#[test]
+fn handler_panic_gives_500_and_server_keeps_serving() {
+    let router = Router::with_builtins().get("/boom", |_| panic!("boom handler"));
+    let mut server = TestServer::start(|_| {}, router);
+    let resp = get(server.addr(), "/boom");
+    assert_error(&resp, 500, "Internal Server Error");
+
+    let resp = get(server.addr(), "/health");
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body_str(), r#"{"status":"ok"}"#);
+    assert!(server.stop_and_join(Duration::from_secs(2)));
+}

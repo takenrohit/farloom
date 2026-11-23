@@ -115,3 +115,121 @@ fn parse_num<T: std::str::FromStr>(
         expected,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<LoadArgs, ArgsError> {
+        LoadArgs::from_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn no_args_gives_defaults() {
+        let a = parse(&[]).unwrap();
+        assert_eq!(a.addr, "127.0.0.1:7878");
+        assert_eq!(a.path, "/");
+        assert_eq!(a.requests, 1000);
+        assert_eq!(a.concurrency, 8);
+        assert_eq!(a, LoadArgs::default());
+    }
+
+    #[test]
+    fn each_option_overrides_default_separate_value() {
+        let a = parse(&["--addr", "10.0.0.1:80"]).unwrap();
+        assert_eq!(a, LoadArgs { addr: "10.0.0.1:80".into(), ..LoadArgs::default() });
+
+        let a = parse(&["--path", "/sleep"]).unwrap();
+        assert_eq!(a, LoadArgs { path: "/sleep".into(), ..LoadArgs::default() });
+
+        let a = parse(&["--requests", "5"]).unwrap();
+        assert_eq!(a, LoadArgs { requests: 5, ..LoadArgs::default() });
+
+        let a = parse(&["--concurrency", "3"]).unwrap();
+        assert_eq!(a, LoadArgs { concurrency: 3, ..LoadArgs::default() });
+    }
+
+    #[test]
+    fn each_option_overrides_default_inline_value() {
+        let a = parse(&["--addr=localhost:9000"]).unwrap();
+        assert_eq!(a, LoadArgs { addr: "localhost:9000".into(), ..LoadArgs::default() });
+
+        let a = parse(&["--path=/index.html"]).unwrap();
+        assert_eq!(a, LoadArgs { path: "/index.html".into(), ..LoadArgs::default() });
+
+        let a = parse(&["--requests=42"]).unwrap();
+        assert_eq!(a, LoadArgs { requests: 42, ..LoadArgs::default() });
+
+        let a = parse(&["--concurrency=16"]).unwrap();
+        assert_eq!(a, LoadArgs { concurrency: 16, ..LoadArgs::default() });
+    }
+
+    #[test]
+    fn all_options_together_and_last_wins() {
+        let a = parse(&[
+            "--addr", "a:1", "--path=/p", "--requests", "7", "--concurrency=2", "--requests=9",
+        ])
+        .unwrap();
+        assert_eq!(
+            a,
+            LoadArgs { addr: "a:1".into(), path: "/p".into(), requests: 9, concurrency: 2 }
+        );
+    }
+
+    #[test]
+    fn zero_requests_fails() {
+        let e = parse(&["--requests", "0"]).unwrap_err();
+        assert_eq!(e, ArgsError::MustBePositive { option: "--requests" });
+        assert!(e.to_string().contains("--requests"));
+        assert!(parse(&["--requests=0"]).is_err());
+    }
+
+    #[test]
+    fn zero_concurrency_fails() {
+        let e = parse(&["--concurrency", "0"]).unwrap_err();
+        assert_eq!(e, ArgsError::MustBePositive { option: "--concurrency" });
+        assert!(e.to_string().contains("--concurrency"));
+        assert!(parse(&["--concurrency=0"]).is_err());
+    }
+
+    #[test]
+    fn non_numeric_values_fail_and_name_option() {
+        let e = parse(&["--requests", "abc"]).unwrap_err();
+        assert!(matches!(e, ArgsError::InvalidValue { option: "--requests", .. }));
+        assert!(e.to_string().contains("--requests"));
+        assert!(e.to_string().contains("abc"));
+
+        let e = parse(&["--concurrency=-1"]).unwrap_err();
+        assert!(matches!(e, ArgsError::InvalidValue { option: "--concurrency", .. }));
+        assert!(e.to_string().contains("--concurrency"));
+    }
+
+    #[test]
+    fn unknown_option_fails_and_names_option() {
+        let e = parse(&["--bogus"]).unwrap_err();
+        assert_eq!(e, ArgsError::UnknownOption("--bogus".into()));
+        assert!(e.to_string().contains("--bogus"));
+
+        let e = parse(&["stray"]).unwrap_err();
+        assert!(matches!(e, ArgsError::UnknownOption(_)));
+    }
+
+    #[test]
+    fn missing_values_fail_and_name_option() {
+        for opt in OPTIONS {
+            let e = parse(&[opt]).unwrap_err();
+            assert_eq!(e, ArgsError::MissingValue { option: opt });
+            assert!(e.to_string().contains(opt), "message for {opt}: {e}");
+        }
+    }
+
+    #[test]
+    fn help_requested() {
+        assert_eq!(parse(&["--help"]).unwrap_err(), ArgsError::HelpRequested);
+        assert_eq!(parse(&["-h"]).unwrap_err(), ArgsError::HelpRequested);
+        assert_eq!(
+            parse(&["--requests", "5", "--help"]).unwrap_err(),
+            ArgsError::HelpRequested
+        );
+    }
+}

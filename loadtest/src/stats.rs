@@ -1,7 +1,5 @@
 //! Per-thread response statistics for the load tester.
 
-// The run loop that uses these items is added in task 15.5.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 

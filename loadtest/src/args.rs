@@ -1,5 +1,4 @@
 //! Command-line argument parsing for the load tester.
-#![allow(dead_code)] // Used by the run loop in main.rs (task 15.5).
 
 use std::fmt;
 

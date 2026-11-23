@@ -7,7 +7,6 @@
 use std::io::{BufReader, ErrorKind, Read};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::panic::{self, AssertUnwindSafe};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::http::parser::{parse_request, ParseError};
@@ -92,7 +91,7 @@ pub fn handle_connection(ctx: &AppContext, conn: Connection) {
     let dur_ms = start.elapsed().as_millis();
     close_gracefully(stream, WORKER_CLOSE_BUDGET);
 
-    let worker = thread::current().name().unwrap_or("acceptor").to_string();
+    let worker = log::current_worker();
     log::access(&AccessRecord {
         ts_ms: log::now_ms(),
         worker: &worker,
@@ -145,6 +144,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::thread;
 
     struct TempDir(PathBuf);
     impl Drop for TempDir {

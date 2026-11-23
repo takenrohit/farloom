@@ -21,6 +21,7 @@
 //! are passed through [`escape_value`] so they cannot contain CR or LF and
 //! therefore cannot start a fake log line.
 
+use std::cell::Cell;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -47,8 +48,24 @@ pub fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-/// Name of the current thread: `worker-{id}` for pool threads, `acceptor` otherwise.
-fn current_worker() -> String {
+thread_local! {
+    /// Per-thread label that overrides the thread name in log lines.
+    static LABEL: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// Sets (or clears with `None`) the label used for the `worker=` field on this
+/// thread. `Server::run` sets `acceptor`, because it runs on the caller's
+/// thread, which is named `main` in the binary.
+pub fn set_thread_label(label: Option<&'static str>) {
+    LABEL.with(|l| l.set(label));
+}
+
+/// Label of the current thread: the value from [`set_thread_label`], else the
+/// thread name (`worker-{id}` for pool threads), else `acceptor`.
+pub fn current_worker() -> String {
+    if let Some(label) = LABEL.with(Cell::get) {
+        return label.to_string();
+    }
     thread::current().name().unwrap_or("acceptor").to_string()
 }
 
@@ -383,5 +400,22 @@ mod tests {
             .join()
             .unwrap();
         assert_eq!(named, "worker-7");
+    }
+
+    #[test]
+    fn thread_label_overrides_thread_name_and_can_be_cleared() {
+        let (labelled, cleared) = thread::Builder::new()
+            .name("main".into())
+            .spawn(|| {
+                set_thread_label(Some("acceptor"));
+                let a = current_worker();
+                set_thread_label(None);
+                (a, current_worker())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(labelled, "acceptor");
+        assert_eq!(cleared, "main");
     }
 }

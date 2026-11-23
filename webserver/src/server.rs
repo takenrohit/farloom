@@ -165,6 +165,8 @@ impl Server {
             ..
         } = self;
 
+        // Log lines from this loop say `worker=acceptor`, not the caller's thread name.
+        log::set_thread_label(Some("acceptor"));
         let mut accepted: u64 = 0;
         while !shutdown.is_shutdown() {
             match listener.accept() {
@@ -198,6 +200,7 @@ impl Server {
         // Stop accepting first, then close the queue and join the workers.
         drop(listener);
         drop(pool);
+        log::set_thread_label(None);
         Ok(())
     }
 }

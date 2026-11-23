@@ -23,7 +23,7 @@
 
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,7 +52,9 @@ fn current_worker() -> String {
     thread::current().name().unwrap_or("acceptor").to_string()
 }
 
-/// Escapes `\`, `"`, CR, and LF so the value stays on one line.
+/// Escapes `\`, `"`, CR, LF, and every other control or line-separator
+/// character so the value stays on one line and cannot inject terminal escape
+/// sequences. Other controls become `\u{XX}`.
 ///
 /// The result is not wrapped in quotes; use it for unquoted fields such as
 /// `path=`. Callers outside this module (for example the static file handler)
@@ -65,10 +67,27 @@ pub fn escape_value(value: &str) -> String {
             '"' => out.push_str("\\\""),
             '\r' => out.push_str("\\r"),
             '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32))
+            }
             _ => out.push(c),
         }
     }
     out
+}
+
+/// Strips the Windows verbatim prefix (`\\?\C:\x` → `C:\x`, `\\?\UNC\h\s` → `\\h\s`)
+/// that `fs::canonicalize` adds, so log lines show familiar paths. Display only.
+pub fn display_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// Escapes a value and wraps it in double quotes (used for `msg=`).
@@ -335,6 +354,17 @@ mod tests {
         assert_eq!(escape_value("\r"), "\\r");
         assert_eq!(escape_value("\n"), "\\n");
         assert_eq!(escape_value("ü\r\n✓"), "ü\\r\\n✓");
+        assert_eq!(escape_value("a\tb"), "a\\tb");
+        assert_eq!(escape_value("\u{1b}[31m"), "\\u{1b}[31m");
+        assert_eq!(escape_value("\0\u{7f}\u{85}\u{9b}"), "\\u{0}\\u{7f}\\u{85}\\u{9b}");
+        assert_eq!(escape_value("x\u{2028}y\u{2029}"), "x\\u{2028}y\\u{2029}");
+    }
+
+    #[test]
+    fn display_path_strips_verbatim_prefix() {
+        assert_eq!(display_path(Path::new(r"\\?\C:\srv\public")), PathBuf::from(r"C:\srv\public"));
+        assert_eq!(display_path(Path::new(r"\\?\UNC\host\share")), PathBuf::from(r"\\host\share"));
+        assert_eq!(display_path(Path::new("/srv/public")), PathBuf::from("/srv/public"));
     }
 
     #[test]

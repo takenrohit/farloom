@@ -4,7 +4,7 @@
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -132,7 +132,7 @@ impl Server {
             local_addr,
             config.workers,
             config.queue_capacity,
-            &display_path(&root),
+            &log::display_path(&root),
         );
 
         Ok(Server {
@@ -220,19 +220,6 @@ fn reject_503(conn: Connection) {
     }
     close_gracefully(stream, REJECT_CLOSE_BUDGET);
     log::rejected(peer);
-}
-
-/// Strips the Windows verbatim prefix (`\\?\C:\x` → `C:\x`, `\\?\UNC\h\s` → `\\h\s`)
-/// so the startup log shows a familiar path. Display only.
-fn display_path(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        PathBuf::from(format!(r"\\{rest}"))
-    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-        PathBuf::from(rest)
-    } else {
-        path.to_path_buf()
-    }
 }
 
 #[cfg(test)]
@@ -441,13 +428,6 @@ mod tests {
             Server::bind(conflict, Router::new()),
             Err(StartupError::Bind { .. })
         ));
-    }
-
-    #[test]
-    fn display_path_strips_verbatim_prefix() {
-        assert_eq!(display_path(Path::new(r"\\?\C:\srv\public")), PathBuf::from(r"C:\srv\public"));
-        assert_eq!(display_path(Path::new(r"\\?\UNC\host\share")), PathBuf::from(r"\\host\share"));
-        assert_eq!(display_path(Path::new("/srv/public")), PathBuf::from("/srv/public"));
     }
 
     #[test]

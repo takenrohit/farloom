@@ -161,7 +161,7 @@ impl StaticFiles {
             Ok(bytes) => Response::new(StatusCode::Ok).with_body(mime_for_path(&path), bytes),
             Err(e) if is_not_found(&e) => Response::error(StatusCode::NotFound),
             Err(e) => {
-                log::error("io", &format!("read {}: {e}", path.display()));
+                log::error("io", &format!("read {}: {e}", log::display_path(&path).display()));
                 Response::error(StatusCode::InternalServerError)
             }
         }

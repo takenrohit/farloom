@@ -88,6 +88,8 @@ pub fn handle_connection(ctx: &AppContext, conn: Connection) {
         log::error("write", &format!("client={peer} {e}"));
         return;
     }
+    // Measure before the drain so dur_ms reflects request handling, not the close budget.
+    let dur_ms = start.elapsed().as_millis();
     close_gracefully(stream, WORKER_CLOSE_BUDGET);
 
     let worker = thread::current().name().unwrap_or("acceptor").to_string();
@@ -98,7 +100,7 @@ pub fn handle_connection(ctx: &AppContext, conn: Connection) {
         method: &method,
         path: &path,
         status: resp.status.code(),
-        dur_ms: start.elapsed().as_millis(),
+        dur_ms,
     });
 }
 
@@ -215,6 +217,37 @@ mod tests {
         let r = dispatch(&c, &req(Method::Post, "/a.txt"));
         assert_eq!(r.status, StatusCode::MethodNotAllowed);
         assert_eq!(header(&r, "Allow"), Some("GET"));
+    }
+
+    #[test]
+    fn dispatch_panic_gives_500_and_context_still_serves_health() {
+        let root = temp_dir();
+        let c = ctx(&root, 1024);
+        for _ in 0..2 {
+            let r = dispatch(&c, &req(Method::Get, "/boom"));
+            assert_eq!(r.status, StatusCode::InternalServerError);
+            let r = dispatch(&c, &req(Method::Get, "/health"));
+            assert_eq!(r.status, StatusCode::Ok);
+            assert_eq!(r.body, br#"{"status":"ok"}"#);
+        }
+    }
+
+    #[test]
+    fn dispatch_wrong_method_on_multi_method_route_lists_allow() {
+        let root = temp_dir();
+        let router = Router::new()
+            .get("/multi", |_| Response::new(StatusCode::Ok))
+            .post("/multi", |_| Response::new(StatusCode::Ok));
+        let c = AppContext {
+            router,
+            static_files: StaticFiles::new(std::fs::canonicalize(&root.0).unwrap()),
+            limits: Limits::new(1024),
+        };
+        let r = dispatch(&c, &req(Method::Other("DELETE".into()), "/multi"));
+        assert_eq!(r.status, StatusCode::MethodNotAllowed);
+        assert_eq!(header(&r, "Allow"), Some("GET, POST"));
+        // Registered methods still dispatch normally.
+        assert_eq!(dispatch(&c, &req(Method::Post, "/multi")).status, StatusCode::Ok);
     }
 
     /// Sends `bytes` to a one-shot server running `handle_connection` and
